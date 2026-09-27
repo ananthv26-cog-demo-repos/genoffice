@@ -33,6 +33,13 @@ function attrPattern(name: string, value: string): RegExp {
   return new RegExp(`${name}=("${value}"|'${value}')`)
 }
 
+/** Same, including the space that separates the attribute from the one before it. */
+function spacedAttrPattern(name: string, value: string): RegExp {
+  return new RegExp(` ${attrPattern(name, value).source}`)
+}
+
+const COL_WIDTH_CHILD = /<w:col [^>]*w:w=(?:"\d+"|'\d+')[^>]*\/>/g
+
 function intAttr(tag: string, name: string, fallback: number): number {
   const m = attrPattern(name, '-?\\d+').exec(tag)
   const v = m ? parseInt(m[1].slice(1, -1), 10) : NaN
@@ -152,7 +159,7 @@ export function sectionSettingsFromXml(
 
   // explicit unequal column widths (w:cols > w:col children)
   const colsElement = /<w:cols[^>]*>[\s\S]*?<\/w:cols>/.exec(xml)?.[0]
-  const colWidths = (colsElement?.match(/<w:col [^>]*w:w=(?:"\d+"|'\d+')[^>]*\/>/g) ?? [])
+  const colWidths = (colsElement?.match(COL_WIDTH_CHILD) ?? [])
     .map((tag) => intAttr(tag, 'w:w', 0))
     .filter((w) => w > 0)
 
@@ -429,7 +436,7 @@ export function applySectionSettings(sectPrXml: string, settings: SectionSetting
   ) {
     // explicit unequal widths: rebuild the element (opt-in via colWidths) —
     // unless the document already carries exactly these values (round-trip)
-    const currentWidths = (colsMatch?.[0].match(/<w:col [^>]*w:w="\d+"[^>]*\/>/g) ?? []).map((t) =>
+    const currentWidths = (colsMatch?.[0].match(COL_WIDTH_CHILD) ?? []).map((t) =>
       intAttr(t, 'w:w', 0),
     )
     const unchanged =
@@ -452,16 +459,18 @@ export function applySectionSettings(sectPrXml: string, settings: SectionSetting
   } else if (colsMatch) {
     const openTag = /^<w:cols[^>]*>/.exec(colsMatch[0])?.[0] ?? colsMatch[0]
     const selfClosing = colsMatch[0].endsWith('/>')
-    const currentNum = / w:num="(\d+)"/.exec(openTag)?.[1] ?? '1'
+    const currentNum = attrPattern('w:num', '\\d+').exec(openTag)?.[1].slice(1, -1) ?? '1'
     if (selfClosing || currentNum !== String(settings.columns)) {
       // explicit per-column widths only stay valid while the count is unchanged
-      let tag = openTag.replace(/ w:num="\d+"/, '').replace(/\/?>$/, '/>')
+      let tag = openTag.replace(spacedAttrPattern('w:num', '\\d+'), '').replace(/\/?>$/, '/>')
       if (numAttr) tag = tag.replace(/^<w:cols/, `<w:cols${numAttr}`)
       // honor an explicitly different column gap (720 = OOXML default); equal
       // values leave the tag byte-identical for round-trip safety
       if (settings.colSpace !== undefined && settings.colSpace !== intAttr(tag, 'w:space', 720)) {
-        tag = / w:space="\d+"/.test(tag)
-          ? tag.replace(/ w:space="\d+"/, ` w:space="${settings.colSpace}"`)
+        const space = spacedAttrPattern('w:space', '\\d+').exec(tag)
+        const quote = space ? space[1][0] : '"'
+        tag = space
+          ? tag.replace(space[0], ` w:space=${quote}${settings.colSpace}${quote}`)
           : tag.replace(/\/>$/, ` w:space="${settings.colSpace}"/>`)
       }
       xml = xml.replace(colsMatch[0], tag)

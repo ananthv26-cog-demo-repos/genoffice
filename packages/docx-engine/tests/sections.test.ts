@@ -910,4 +910,21 @@ describe('single-quoted attributes', () => {
     expect(pgMar).toContain("w:top='720'")
     expect(sectionSettingsFromXml(saved).marginLeft).toBe(2000)
   })
+
+  it('saving keeps a single w:num on a single-quoted w:cols', () => {
+    const saved = applySectionSettings(SQ, sectionSettingsFromXml(SQ))
+    const cols = /<w:cols[^>]*\/?>/.exec(saved)![0]
+    expect(cols.match(/w:num=/g)).toHaveLength(1)
+    expect(sectionSettingsFromXml(saved).columns).toBe(2)
+  })
+
+  it('unchanged single-quoted column widths keep their per-column spacing', () => {
+    const xml =
+      "<w:sectPr><w:pgSz w:w='11906' w:h='16838'/>" +
+      "<w:pgMar w:top='720' w:right='1080' w:bottom='720' w:left='1080'/>" +
+      "<w:cols w:num='2' w:space='480' w:equalWidth='0'>" +
+      "<w:col w:w='6000' w:space='240'/><w:col w:w='7000'/></w:cols></w:sectPr>"
+    const saved = applySectionSettings(xml, sectionSettingsFromXml(xml))
+    expect(saved).toContain("<w:col w:w='6000' w:space='240'/>")
+  })
 })
