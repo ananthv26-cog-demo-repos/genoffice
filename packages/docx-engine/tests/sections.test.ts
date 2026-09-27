@@ -98,6 +98,29 @@ describe('readSections enumerates all sections', () => {
     )
   })
 
+  it('single-quoted page attributes are read, not replaced by the Letter defaults (#1233)', () => {
+    const singleQuoted =
+      "<w:sectPr><w:pgSz w:w='11906' w:h='16838' w:orient='landscape'/>" +
+      "<w:pgMar w:top='100' w:right='200' w:bottom='300' w:left='400' w:header='708' w:footer='708' w:gutter='0'/>" +
+      '</w:sectPr>'
+    expect(sectionSettingsFromXml(singleQuoted)).toMatchObject({
+      pageWidth: 11906,
+      pageHeight: 16838,
+      orientation: 'landscape',
+      marginTop: 100,
+      marginRight: 200,
+      marginBottom: 300,
+      marginLeft: 400,
+      headerDist: 708,
+      footerDist: 708,
+    })
+    // saving back rewrites the existing attributes instead of appending duplicates
+    const saved = applySectionSettings(singleQuoted, sectionSettingsFromXml(singleQuoted))
+    expect(saved).toContain('<w:pgSz w:w="11906" w:h="16838" w:orient="landscape"/>')
+    expect(saved.match(/w:top=/g)).toHaveLength(1)
+    expect(sectionSettingsFromXml(saved)).toEqual(sectionSettingsFromXml(singleQuoted))
+  })
+
   it('a section-break paragraph with visible text stays an editable paragraph (tdf#159032)', async () => {
     const withText =
       '<w:p><w:pPr><w:spacing w:after="0"/><w:sectPr>' +

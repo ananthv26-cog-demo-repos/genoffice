@@ -28,9 +28,10 @@ function vAlignOf(xml: string): 'center' | 'both' | 'bottom' | undefined {
   return v as 'center' | 'both' | 'bottom' | undefined
 }
 
+/** Integer attribute value; both XML quote styles are legal (w:w="1" and w:w='1'). */
 function intAttr(tag: string, name: string, fallback: number): number {
-  const m = new RegExp(`${name}="(-?\\d+)"`).exec(tag)
-  const v = m ? parseInt(m[1], 10) : NaN
+  const m = new RegExp(`${name}=(?:"(-?\\d+)"|'(-?\\d+)')`).exec(tag)
+  const v = m ? parseInt(m[1] ?? m[2], 10) : NaN
   return Number.isFinite(v) ? v : fallback
 }
 
@@ -165,7 +166,7 @@ export function sectionSettingsFromXml(
   return {
     pageWidth: intAttr(pgSz, 'w:w', DEFAULT_SECTION.pageWidth),
     pageHeight: intAttr(pgSz, 'w:h', DEFAULT_SECTION.pageHeight),
-    orientation: pgSz.includes('w:orient="landscape"') ? 'landscape' : 'portrait',
+    orientation: /w:orient=["']landscape["']/.test(pgSz) ? 'landscape' : 'portrait',
     marginTop: Math.abs(marginTop) + (gutterAtTop ? gutter : 0),
     marginRight: intAttr(pgMar, 'w:right', DEFAULT_SECTION.marginRight),
     marginBottom: Math.abs(marginBottom),
@@ -356,8 +357,8 @@ export function applySectionSettings(sectPrXml: string, settings: SectionSetting
     xml = xml.replace(/(<w:sectPr[^>]*>)/, `$1${pgSz}`)
   }
   const replaceMarAttr = (tag: string, name: string, value: number): string => {
-    if (new RegExp(`${name}="`).test(tag)) {
-      return tag.replace(new RegExp(`${name}="-?\\d+"`), `${name}="${value}"`)
+    if (new RegExp(`${name}=["']`).test(tag)) {
+      return tag.replace(new RegExp(`${name}=(?:"-?\\d+"|'-?\\d+')`), `${name}="${value}"`)
     }
     return tag.replace(/\/>$/, ` ${name}="${value}"/>`)
   }
