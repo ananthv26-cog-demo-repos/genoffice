@@ -1,0 +1,169 @@
+# Devin git-backed blueprint for GenOffice.
+# Every Devin VM boots with the released GenOffice desktop app preinstalled, the
+# bundled `genoffice` CLI on PATH, this checkout's node_modules ready, and the
+# app configured to skip onboarding so Computer Use can start clicking immediately.
+#
+# Two documents: Linux (release .deb) and Windows (release NSIS Setup.exe).
+# Pinned release: https://github.com/genspark-ai/genoffice/releases/tag/v0.10.1467
+
+runs-on: default
+
+initialize:
+  - name: Install Node.js 22 (GenOffice requires node >=22.12, npm >=10)
+    uses: github.com/actions/setup-node@v4
+    with:
+      node-version: "22"
+
+  - name: Install GenOffice desktop app from the pinned release .deb
+    run: |
+      set -euo pipefail
+      GENOFFICE_VERSION=0.10.1467
+      curl -fsSL -o /tmp/genoffice.deb \
+        "https://github.com/genspark-ai/genoffice/releases/download/v${GENOFFICE_VERSION}/genoffice_${GENOFFICE_VERSION}_amd64.deb"
+      sudo apt-get update -qq
+      sudo apt-get install -y -qq /tmp/genoffice.deb
+      rm -f /tmp/genoffice.deb
+      # bundled headless CLI (same engines as the app) on PATH
+      sudo ln -sf /opt/GenOffice/resources/cli/genoffice /usr/local/bin/genoffice
+      genoffice --version
+
+  - name: Pre-seed GenOffice settings (skip onboarding, no analytics) and a launcher
+    run: |
+      set -euo pipefail
+      mkdir -p /home/ubuntu/.config/GenOffice
+      echo '{"onboardingSeen":true,"analyticsEnabled":false}' > /home/ubuntu/.config/GenOffice/app-settings.json
+      # `genoffice-gui [file]` — launches the desktop app detached with the flags a
+      # GPU-less VM needs, plus a CDP port so Playwright can attach (localhost:9333).
+      cat <<'SH' | sudo tee /usr/local/bin/genoffice-gui >/dev/null
+      #!/usr/bin/env bash
+      export DISPLAY="${DISPLAY:-:0}"
+      export GENOFFICE_LANG="${GENOFFICE_LANG:-en}"
+      nohup /opt/GenOffice/genoffice --no-sandbox --disable-gpu --remote-debugging-port=9333 "$@" \
+        >/tmp/genoffice-app.log 2>&1 &
+      for _ in $(seq 1 40); do curl -fs http://localhost:9333/json/version >/dev/null 2>&1 && break; sleep 0.25; done
+      command -v wmctrl >/dev/null && wmctrl -r GenOffice -b add,maximized_vert,maximized_horz 2>/dev/null || true
+      echo "GenOffice running (pid $!), CDP http://localhost:9333"
+      SH
+      sudo chmod +x /usr/local/bin/genoffice-gui
+
+  - name: Track upstream genspark-ai/genoffice (issues + snapshots live there)
+    run: |
+      git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/genspark-ai/genoffice.git
+
+  - name: Demo corpus (tracked-changes .docx used by the fidelity oracle)
+    run: |
+      set -euo pipefail
+      mkdir -p /home/ubuntu/demo-files
+      python3 /home/ubuntu/repos/genoffice/.devin/corpus/make_tracked_docx.py /home/ubuntu/demo-files/tracked-motion.docx
+
+maintenance:
+  - name: Install GenOffice source dependencies (npm workspaces + Electron)
+    run: |
+      set -euo pipefail
+      cd /home/ubuntu/repos/genoffice
+      npm install --no-audit --no-fund
+
+  - name: "Smoke: app installed, CLI works, oracle passes on a headless edit"
+    run: |
+      set -euo pipefail
+      test -x /opt/GenOffice/genoffice
+      genoffice --version
+      cd /home/ubuntu/demo-files
+      echo '[{"op":"findReplace","find":"ACME","replace":"Acme Corp"}]' > /tmp/ops.json
+      genoffice docs apply tracked-motion.docx --ops /tmp/ops.json --out /tmp/smoke.docx --force --json >/dev/null
+      python3 /home/ubuntu/repos/genoffice/.devin/corpus/ooxml_oracle.py tracked-motion.docx /tmp/smoke.docx >/dev/null
+
+knowledge:
+  - name: Launch the GenOffice desktop app (GUI, maximized, CDP on :9333)
+    contents: |
+      genoffice-gui                      # home screen
+      genoffice-gui /home/ubuntu/demo-files/tracked-motion.docx   # open a file directly
+      genoffice open <file.docx|xlsx|pptx|pdf>   # open/select in the already-running app
+      Installed at /opt/GenOffice/genoffice (v0.10.1467, Electron 43 / Chrome 150). userData: ~/.config/GenOffice
+      Playwright can attach via chromium.connectOverCDP('http://localhost:9333').
+  - name: GenOffice headless CLI (same engines as the app)
+    contents: |
+      genoffice --help | genoffice docs read|apply|check <file.docx> [--ops ops.json] [--track] [--out x.docx]
+      genoffice guide docs        # op reference (findReplace, insert_content, accept_changes, ...)
+      genoffice render <file> --out dir/   # PNG per page as the app lays it out
+      genoffice sheet / slides / pdf / convert / info
+  - name: OOXML byte-preservation oracle (document-fidelity checks)
+    contents: |
+      python3 .devin/corpus/ooxml_oracle.py before.docx after.docx [--expect-changed N]
+      exit 0 = only the intended paragraphs changed; every other <w:p>, revision id, proofErr, bookmark and w16du:dateUtc is byte-identical.
+      python3 .devin/corpus/make_tracked_docx.py out.docx   # regenerate the synthetic tracked-changes fixture
+  - name: This checkout (/home/ubuntu/repos/genoffice)
+    contents: |
+      origin = this fork (PRs go here); upstream = genspark-ai/genoffice (issue numbers refer to upstream; fork has no issue tracker).
+      npm run lint | npm run typecheck | npm run test -w @genoffice/<package> | npm run build:all
+      npm run test:e2e   # Playwright electron E2E (needs build:all first; e2e/helpers.ts)
+      Engines are pure TS in packages/* (vitest in packages/<name>/tests/*.test.ts); app main-process code compiles into apps/shell.
+      Run the rebuilt app from source: npm run build:all && (cd apps/shell && npx electron . --no-sandbox --disable-gpu --remote-debugging-port=9333 <file>)
+      Read CLAUDE.md and CONTRIBUTING.md first (theme tokens, i18n shards, PR template; upstream main advances via squashed snapshots).
+  - name: Standard for working a GenOffice issue end to end
+    contents: |
+      1. Reproduce on the shipped app first (genoffice-gui / genoffice CLI, screen recording + screenshots), never only in unit tests.
+      2. Failing test first in the owning package, then the smallest fix; keep the diff scoped, no drive-by reformatting.
+      3. Gates: npm run lint, npm run typecheck, npm run test -w <package>; rebuild (build:all) and re-run the same repro in the app from source.
+      4. For .docx edits, prove byte-confinement with .devin/corpus/ooxml_oracle.py before/after; for layout bugs compare `genoffice render` page PNGs.
+      5. PR to origin (the fork) following .github/pull_request_template.md, "Fixes genspark-ai/genoffice#<n>", before/after evidence embedded; attach the recording in the final message.
+      6. Cross-platform claims need a Windows child session running the same repro against the shipped Windows build.
+
+---
+
+runs-on: windows
+
+initialize:
+  - name: Install Node.js 22
+    uses: github.com/actions/setup-node@v4
+    with:
+      node-version: "22"
+
+  - name: Install GenOffice (pinned NSIS installer, silent, current user)
+    shell: powershell
+    run: |
+      $ErrorActionPreference = "Stop"
+      $v = "0.10.1467"
+      $exe = "$env:TEMP\GenOfficeSetup.exe"
+      Invoke-WebRequest -Uri "https://github.com/genspark-ai/genoffice/releases/download/v$v/GenOfficeSetup-v$v-x64.exe" -OutFile $exe
+      Start-Process -FilePath $exe -ArgumentList "/S","/currentuser" -Wait
+      Remove-Item $exe -Force
+      $app = "$env:LOCALAPPDATA\Programs\GenOffice"
+      if (-not (Test-Path "$app\GenOffice.exe")) { throw "GenOffice.exe not found under $app" }
+      # bundled CLI on the user PATH
+      $cli = "$app\resources\cli"
+      [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$cli", "User")
+      & "$cli\genoffice.cmd" --version
+
+  - name: Pre-seed GenOffice settings (skip onboarding, no analytics)
+    shell: powershell
+    run: |
+      New-Item -ItemType Directory -Force -Path "$env:APPDATA\GenOffice" | Out-Null
+      '{"onboardingSeen":true,"analyticsEnabled":false}' | Set-Content -Encoding ascii "$env:APPDATA\GenOffice\app-settings.json"
+
+  - name: Track upstream genspark-ai/genoffice
+    shell: powershell
+    run: |
+      git remote get-url upstream 2>$null; if ($LASTEXITCODE -ne 0) { git remote add upstream https://github.com/genspark-ai/genoffice.git }
+
+maintenance:
+  - name: Install GenOffice source dependencies
+    shell: powershell
+    run: |
+      npm install --no-audit --no-fund
+
+  - name: "Smoke: app + CLI present"
+    shell: powershell
+    run: |
+      $app = "$env:LOCALAPPDATA\Programs\GenOffice"
+      if (-not (Test-Path "$app\GenOffice.exe")) { throw "GenOffice not installed" }
+      & "$app\resources\cli\genoffice.cmd" --version
+
+knowledge:
+  - name: Launch the GenOffice desktop app (Windows)
+    contents: |
+      Start-Process "$env:LOCALAPPDATA\Programs\GenOffice\GenOffice.exe" -ArgumentList "--remote-debugging-port=9333"
+      genoffice.cmd open <file.docx>     # open in the running app (CLI is on the user PATH)
+      userData: %APPDATA%\GenOffice (app-settings.json pre-seeded with onboardingSeen=true)
+  - name: GenOffice headless CLI
+    contents: genoffice.cmd --help | genoffice.cmd docs apply <file.docx> --ops ops.json --out out.docx --json
