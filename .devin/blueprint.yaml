@@ -113,6 +113,7 @@ knowledge:
 ---
 
 runs-on: windows
+shell: powershell
 
 initialize:
   - name: Install Node.js 22
@@ -121,7 +122,6 @@ initialize:
       node-version: "22"
 
   - name: Install GenOffice (pinned NSIS installer, silent, current user)
-    shell: powershell
     run: |
       $ErrorActionPreference = "Stop"
       $v = "0.10.1467"
@@ -137,7 +137,6 @@ initialize:
       & "$cli\genoffice.cmd" --version
 
   - name: Pre-seed GenOffice settings (skip onboarding, analytics, star prompt) and a launcher
-    shell: powershell
     run: |
       $ErrorActionPreference = "Stop"
       New-Item -ItemType Directory -Force -Path "$env:APPDATA\GenOffice" | Out-Null
@@ -167,25 +166,21 @@ initialize:
       [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$bin", "User")
 
   - name: Shell tooling (ripgrep, Python) for scripts and the OOXML oracle
-    shell: powershell
     run: |
       choco install -y --no-progress ripgrep python312
 
   - name: Track upstream genspark-ai/genoffice
-    shell: powershell
     run: |
       $R = "$HOME\repos\genoffice"
       git -C $R remote get-url upstream 2>$null; if ($LASTEXITCODE -ne 0) { git -C $R remote add upstream https://github.com/genspark-ai/genoffice.git }
 
 maintenance:
   - name: Install GenOffice source dependencies
-    shell: powershell
     run: |
       Set-Location "$HOME\repos\genoffice"
       npm install --no-audit --no-fund
 
   - name: "Smoke: app + CLI present"
-    shell: powershell
     run: |
       $app = "$env:LOCALAPPDATA\Programs\GenOffice"
       if (-not (Test-Path "$app\GenOffice.exe")) { throw "GenOffice not installed" }
