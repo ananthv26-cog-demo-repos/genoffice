@@ -48,7 +48,8 @@ initialize:
 
   - name: Track upstream genspark-ai/genoffice (issues + snapshots live there)
     run: |
-      git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/genspark-ai/genoffice.git
+      R=/home/ubuntu/repos/genoffice
+      git -C "$R" remote get-url upstream >/dev/null 2>&1 || git -C "$R" remote add upstream https://github.com/genspark-ai/genoffice.git
 
   - name: Demo corpus (tracked-changes .docx used by the fidelity oracle)
     run: |
@@ -144,12 +145,14 @@ initialize:
   - name: Track upstream genspark-ai/genoffice
     shell: powershell
     run: |
-      git remote get-url upstream 2>$null; if ($LASTEXITCODE -ne 0) { git remote add upstream https://github.com/genspark-ai/genoffice.git }
+      $R = "$HOME\repos\genoffice"
+      git -C $R remote get-url upstream 2>$null; if ($LASTEXITCODE -ne 0) { git -C $R remote add upstream https://github.com/genspark-ai/genoffice.git }
 
 maintenance:
   - name: Install GenOffice source dependencies
     shell: powershell
     run: |
+      Set-Location "$HOME\repos\genoffice"
       npm install --no-audit --no-fund
 
   - name: "Smoke: app + CLI present"
