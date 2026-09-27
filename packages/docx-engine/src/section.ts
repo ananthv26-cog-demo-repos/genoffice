@@ -28,9 +28,21 @@ function vAlignOf(xml: string): 'center' | 'both' | 'bottom' | undefined {
   return v as 'center' | 'both' | 'bottom' | undefined
 }
 
+/** Attribute value regardless of the quote character; both are legal XML. */
+function attrPattern(name: string, value: string): RegExp {
+  return new RegExp(`${name}=("${value}"|'${value}')`)
+}
+
+/** Same, including the space that separates the attribute from the one before it. */
+function spacedAttrPattern(name: string, value: string): RegExp {
+  return new RegExp(` ${attrPattern(name, value).source}`)
+}
+
+const COL_WIDTH_CHILD = /<w:col [^>]*w:w=(?:"\d+"|'\d+')[^>]*\/>/g
+
 function intAttr(tag: string, name: string, fallback: number): number {
-  const m = new RegExp(`${name}="(-?\\d+)"`).exec(tag)
-  const v = m ? parseInt(m[1], 10) : NaN
+  const m = attrPattern(name, '-?\\d+').exec(tag)
+  const v = m ? parseInt(m[1].slice(1, -1), 10) : NaN
   return Number.isFinite(v) ? v : fallback
 }
 
@@ -133,21 +145,21 @@ export function sectionSettingsFromXml(
   let docGrid: DocGrid | undefined
   const docGridTag = /<w:docGrid[^>]*\/?>/.exec(xml)?.[0]
   if (docGridTag) {
-    const typeMatch = /w:type="([^"]+)"/.exec(docGridTag)
-    const linePitchMatch = /w:linePitch="(\d+)"/.exec(docGridTag)
-    const charSpaceMatch = /w:charSpace="(-?\d+)"/.exec(docGridTag)
-    const gridType = (typeMatch?.[1] ?? 'default') as DocGrid['type']
+    const typeMatch = attrPattern('w:type', '[^"\']+').exec(docGridTag)
+    const linePitchMatch = attrPattern('w:linePitch', '\\d+').exec(docGridTag)
+    const charSpaceMatch = attrPattern('w:charSpace', '-?\\d+').exec(docGridTag)
+    const gridType = (typeMatch?.[1].slice(1, -1) ?? 'default') as DocGrid['type']
     const validTypes: DocGrid['type'][] = ['default', 'lines', 'linesAndChars', 'snapToChars']
     docGrid = {
       type: validTypes.includes(gridType) ? gridType : 'default',
-      ...(linePitchMatch ? { linePitch: parseInt(linePitchMatch[1], 10) } : {}),
-      ...(charSpaceMatch ? { charSpace: parseInt(charSpaceMatch[1], 10) } : {}),
+      ...(linePitchMatch ? { linePitch: parseInt(linePitchMatch[1].slice(1, -1), 10) } : {}),
+      ...(charSpaceMatch ? { charSpace: parseInt(charSpaceMatch[1].slice(1, -1), 10) } : {}),
     }
   }
 
   // explicit unequal column widths (w:cols > w:col children)
   const colsElement = /<w:cols[^>]*>[\s\S]*?<\/w:cols>/.exec(xml)?.[0]
-  const colWidths = (colsElement?.match(/<w:col [^>]*w:w="\d+"[^>]*\/>/g) ?? [])
+  const colWidths = (colsElement?.match(COL_WIDTH_CHILD) ?? [])
     .map((tag) => intAttr(tag, 'w:w', 0))
     .filter((w) => w > 0)
 
@@ -165,7 +177,7 @@ export function sectionSettingsFromXml(
   return {
     pageWidth: intAttr(pgSz, 'w:w', DEFAULT_SECTION.pageWidth),
     pageHeight: intAttr(pgSz, 'w:h', DEFAULT_SECTION.pageHeight),
-    orientation: pgSz.includes('w:orient="landscape"') ? 'landscape' : 'portrait',
+    orientation: attrPattern('w:orient', 'landscape').test(pgSz) ? 'landscape' : 'portrait',
     marginTop: Math.abs(marginTop) + (gutterAtTop ? gutter : 0),
     marginRight: intAttr(pgMar, 'w:right', DEFAULT_SECTION.marginRight),
     marginBottom: Math.abs(marginBottom),
@@ -356,8 +368,10 @@ export function applySectionSettings(sectPrXml: string, settings: SectionSetting
     xml = xml.replace(/(<w:sectPr[^>]*>)/, `$1${pgSz}`)
   }
   const replaceMarAttr = (tag: string, name: string, value: number): string => {
-    if (new RegExp(`${name}="`).test(tag)) {
-      return tag.replace(new RegExp(`${name}="-?\\d+"`), `${name}="${value}"`)
+    const existing = attrPattern(name, '-?\\d+').exec(tag)
+    if (existing) {
+      const quote = existing[1][0]
+      return tag.replace(existing[0], `${name}=${quote}${value}${quote}`)
     }
     return tag.replace(/\/>$/, ` ${name}="${value}"/>`)
   }
@@ -422,7 +436,7 @@ export function applySectionSettings(sectPrXml: string, settings: SectionSetting
   ) {
     // explicit unequal widths: rebuild the element (opt-in via colWidths) —
     // unless the document already carries exactly these values (round-trip)
-    const currentWidths = (colsMatch?.[0].match(/<w:col [^>]*w:w="\d+"[^>]*\/>/g) ?? []).map((t) =>
+    const currentWidths = (colsMatch?.[0].match(COL_WIDTH_CHILD) ?? []).map((t) =>
       intAttr(t, 'w:w', 0),
     )
     const unchanged =
@@ -445,16 +459,18 @@ export function applySectionSettings(sectPrXml: string, settings: SectionSetting
   } else if (colsMatch) {
     const openTag = /^<w:cols[^>]*>/.exec(colsMatch[0])?.[0] ?? colsMatch[0]
     const selfClosing = colsMatch[0].endsWith('/>')
-    const currentNum = / w:num="(\d+)"/.exec(openTag)?.[1] ?? '1'
+    const currentNum = attrPattern('w:num', '\\d+').exec(openTag)?.[1].slice(1, -1) ?? '1'
     if (selfClosing || currentNum !== String(settings.columns)) {
       // explicit per-column widths only stay valid while the count is unchanged
-      let tag = openTag.replace(/ w:num="\d+"/, '').replace(/\/?>$/, '/>')
+      let tag = openTag.replace(spacedAttrPattern('w:num', '\\d+'), '').replace(/\/?>$/, '/>')
       if (numAttr) tag = tag.replace(/^<w:cols/, `<w:cols${numAttr}`)
       // honor an explicitly different column gap (720 = OOXML default); equal
       // values leave the tag byte-identical for round-trip safety
       if (settings.colSpace !== undefined && settings.colSpace !== intAttr(tag, 'w:space', 720)) {
-        tag = / w:space="\d+"/.test(tag)
-          ? tag.replace(/ w:space="\d+"/, ` w:space="${settings.colSpace}"`)
+        const space = spacedAttrPattern('w:space', '\\d+').exec(tag)
+        const quote = space ? space[1][0] : '"'
+        tag = space
+          ? tag.replace(space[0], ` w:space=${quote}${settings.colSpace}${quote}`)
           : tag.replace(/\/>$/, ` w:space="${settings.colSpace}"/>`)
       }
       xml = xml.replace(colsMatch[0], tag)

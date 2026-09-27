@@ -866,3 +866,65 @@ describe('sectPr w:lnNumType', () => {
     expect([flag('Quiet'), flag('Loud'), flag('Inherit')]).toEqual([true, false, true])
   })
 })
+
+describe('single-quoted attributes', () => {
+  const SQ =
+    "<w:sectPr><w:pgSz w:w='11906' w:h='16838' w:orient='portrait'/>" +
+    "<w:pgMar w:top='720' w:right='1080' w:bottom='720' w:left='1080' w:header='360' w:footer='360' w:gutter='0'/>" +
+    "<w:cols w:num='2' w:space='480'/>" +
+    "<w:docGrid w:type='lines' w:linePitch='312'/></w:sectPr>"
+
+  it('page geometry comes from the file, not DEFAULT_SECTION', () => {
+    expect(sectionSettingsFromXml(SQ)).toMatchObject({
+      pageWidth: 11906,
+      pageHeight: 16838,
+      marginTop: 720,
+      marginRight: 1080,
+      marginBottom: 720,
+      marginLeft: 1080,
+      headerDist: 360,
+      footerDist: 360,
+      columns: 2,
+      colSpace: 480,
+      docGrid: { type: 'lines', linePitch: 312 },
+    })
+  })
+
+  it('landscape and explicit w:col widths are read through single quotes', () => {
+    const landscape = sectionSettingsFromXml(
+      "<w:sectPr><w:pgSz w:w='16838' w:h='11906' w:orient='landscape'/>" +
+        "<w:cols w:num='2' w:space='480'><w:col w:w='6000'/><w:col w:w='7000'/></w:cols></w:sectPr>",
+    )
+    expect(landscape.orientation).toBe('landscape')
+    expect(landscape.colWidths).toEqual([6000, 7000])
+  })
+
+  it('saving rewrites the existing attributes instead of appending duplicates', () => {
+    const saved = applySectionSettings(SQ, {
+      ...sectionSettingsFromXml(SQ),
+      marginLeft: 2000,
+    })
+    const pgMar = /<w:pgMar[^>]*\/>/.exec(saved)![0]
+    expect(pgMar.match(/w:left=/g)).toHaveLength(1)
+    expect(pgMar).toContain("w:left='2000'")
+    expect(pgMar).toContain("w:top='720'")
+    expect(sectionSettingsFromXml(saved).marginLeft).toBe(2000)
+  })
+
+  it('saving keeps a single w:num on a single-quoted w:cols', () => {
+    const saved = applySectionSettings(SQ, sectionSettingsFromXml(SQ))
+    const cols = /<w:cols[^>]*\/?>/.exec(saved)![0]
+    expect(cols.match(/w:num=/g)).toHaveLength(1)
+    expect(sectionSettingsFromXml(saved).columns).toBe(2)
+  })
+
+  it('unchanged single-quoted column widths keep their per-column spacing', () => {
+    const xml =
+      "<w:sectPr><w:pgSz w:w='11906' w:h='16838'/>" +
+      "<w:pgMar w:top='720' w:right='1080' w:bottom='720' w:left='1080'/>" +
+      "<w:cols w:num='2' w:space='480' w:equalWidth='0'>" +
+      "<w:col w:w='6000' w:space='240'/><w:col w:w='7000'/></w:cols></w:sectPr>"
+    const saved = applySectionSettings(xml, sectionSettingsFromXml(xml))
+    expect(saved).toContain("<w:col w:w='6000' w:space='240'/>")
+  })
+})
