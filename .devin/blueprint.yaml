@@ -27,11 +27,11 @@ initialize:
       sudo ln -sf /opt/GenOffice/resources/cli/genoffice /usr/local/bin/genoffice
       genoffice --version
 
-  - name: Pre-seed GenOffice settings (skip onboarding, no analytics) and a launcher
+  - name: Pre-seed GenOffice settings (skip onboarding, analytics, star prompt) and a launcher
     run: |
       set -euo pipefail
       mkdir -p /home/ubuntu/.config/GenOffice
-      echo '{"onboardingSeen":true,"analyticsEnabled":false}' > /home/ubuntu/.config/GenOffice/app-settings.json
+      echo '{"onboardingSeen":true,"analyticsEnabled":false,"lastRunVersion":"0.10.1467","starPrompt":{"resolved":true}}' > /home/ubuntu/.config/GenOffice/app-settings.json
       # `genoffice-gui [file]` — launches the desktop app detached with the flags a
       # GPU-less VM needs, plus a CDP port so Playwright can attach (localhost:9333).
       cat <<'SH' | sudo tee /usr/local/bin/genoffice-gui >/dev/null
@@ -126,7 +126,7 @@ initialize:
       $ErrorActionPreference = "Stop"
       $v = "0.10.1467"
       $exe = "$env:TEMP\GenOfficeSetup.exe"
-      Invoke-WebRequest -Uri "https://github.com/genspark-ai/genoffice/releases/download/v$v/GenOfficeSetup-v$v-x64.exe" -OutFile $exe
+      Invoke-WebRequest -Uri "https://github.com/genspark-ai/genoffice/releases/download/v$v/GenOfficeSetup-v$v-x64.exe" -OutFile $exe -UseBasicParsing
       Start-Process -FilePath $exe -ArgumentList "/S","/currentuser" -Wait
       Remove-Item $exe -Force
       $app = "$env:LOCALAPPDATA\Programs\GenOffice"
@@ -136,11 +136,40 @@ initialize:
       [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$cli", "User")
       & "$cli\genoffice.cmd" --version
 
-  - name: Pre-seed GenOffice settings (skip onboarding, no analytics)
+  - name: Pre-seed GenOffice settings (skip onboarding, analytics, star prompt) and a launcher
     shell: powershell
     run: |
+      $ErrorActionPreference = "Stop"
       New-Item -ItemType Directory -Force -Path "$env:APPDATA\GenOffice" | Out-Null
-      '{"onboardingSeen":true,"analyticsEnabled":false}' | Set-Content -Encoding ascii "$env:APPDATA\GenOffice\app-settings.json"
+      '{"onboardingSeen":true,"analyticsEnabled":false,"lastRunVersion":"0.10.1467","starPrompt":{"resolved":true}}' | Set-Content -Encoding ascii "$env:APPDATA\GenOffice\app-settings.json"
+      # `genoffice-gui [file...]` — start the app with CDP on :9333, wait for the page target, maximize.
+      $bin = "$env:LOCALAPPDATA\devin-bin"
+      New-Item -ItemType Directory -Force -Path $bin | Out-Null
+      @'
+      param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Files)
+      $exe = "$env:LOCALAPPDATA\Programs\GenOffice\GenOffice.exe"
+      $argv = @("--remote-debugging-port=9333")
+      if ($Files) { $argv += $Files }
+      Start-Process -FilePath $exe -ArgumentList $argv
+      for ($i = 0; $i -lt 40; $i++) {
+        try { $targets = Invoke-RestMethod http://localhost:9333/json -UseBasicParsing -TimeoutSec 2; if ($targets | Where-Object type -eq "page") { break } } catch {}
+        Start-Sleep -Milliseconds 250
+      }
+      Add-Type -Namespace Win -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);'
+      for ($i = 0; $i -lt 20; $i++) {
+        $p = Get-Process GenOffice -ErrorAction SilentlyContinue | Where-Object MainWindowHandle -ne 0 | Select-Object -First 1
+        if ($p) { [Win.U]::ShowWindow($p.MainWindowHandle, 3) | Out-Null; break }
+        Start-Sleep -Milliseconds 250
+      }
+      Write-Output "GenOffice running, CDP http://localhost:9333"
+      '@ | Set-Content -Encoding ascii "$bin\genoffice-gui.ps1"
+      "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0genoffice-gui.ps1`" %*" | Set-Content -Encoding ascii "$bin\genoffice-gui.cmd"
+      [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$bin", "User")
+
+  - name: Shell tooling (ripgrep, Python) for scripts and the OOXML oracle
+    shell: powershell
+    run: |
+      choco install -y --no-progress ripgrep python312
 
   - name: Track upstream genspark-ai/genoffice
     shell: powershell
@@ -163,10 +192,12 @@ maintenance:
       & "$app\resources\cli\genoffice.cmd" --version
 
 knowledge:
-  - name: Launch the GenOffice desktop app (Windows)
+  - name: Launch the GenOffice desktop app (Windows, maximized, CDP on :9333)
     contents: |
-      Start-Process "$env:LOCALAPPDATA\Programs\GenOffice\GenOffice.exe" -ArgumentList "--remote-debugging-port=9333"
-      genoffice.cmd open <file.docx>     # open in the running app (CLI is on the user PATH)
-      userData: %APPDATA%\GenOffice (app-settings.json pre-seeded with onboardingSeen=true)
+      genoffice-gui [file.docx]          # starts GenOffice.exe with CDP, waits for the page target (~1 s), maximizes
+      genoffice.cmd open <file.docx>     # open in the already-running app (needs the GUI up; CLI is on the user PATH)
+      Installed at %LOCALAPPDATA%\Programs\GenOffice\GenOffice.exe; userData %APPDATA%\GenOffice (settings pre-seeded, no first-run toasts).
+      Write .md/.json inputs without a BOM (PowerShell -Encoding UTF8 adds one and it leaks into the docx); use -Encoding ascii or utf8NoBOM.
+      Pinned v0.10.1467; if the updater ever shows "update available", click Later (in-memory only).
   - name: GenOffice headless CLI
     contents: genoffice.cmd --help | genoffice.cmd docs apply <file.docx> --ops ops.json --out out.docx --json
