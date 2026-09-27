@@ -22,15 +22,22 @@ export const DEFAULT_SECTION: SectionSettings = {
   footerDist: 720,
 }
 
+/** Attribute value from a start tag. XML allows either quote character around a value. */
+export function attrValue(tag: string, name: string): string | undefined {
+  const m = new RegExp(`${name}=(?:"([^"]*)"|'([^']*)')`).exec(tag)
+  return m ? (m[1] ?? m[2]) : undefined
+}
+
 /** Vertical alignment of page content (sectPr w:vAlign); top/default returns undefined */
 function vAlignOf(xml: string): 'center' | 'both' | 'bottom' | undefined {
-  const v = /<w:vAlign w:val="(center|both|bottom)"\s*\/>/.exec(xml)?.[1]
-  return v as 'center' | 'both' | 'bottom' | undefined
+  const tag = /<w:vAlign\b[^>]*\/?>/.exec(xml)?.[0]
+  const v = tag ? attrValue(tag, 'w:val') : undefined
+  return v === 'center' || v === 'both' || v === 'bottom' ? v : undefined
 }
 
 function intAttr(tag: string, name: string, fallback: number): number {
-  const m = new RegExp(`${name}="(-?\\d+)"`).exec(tag)
-  const v = m ? parseInt(m[1], 10) : NaN
+  const raw = attrValue(tag, name)
+  const v = raw !== undefined && /^-?\d+$/.test(raw) ? parseInt(raw, 10) : NaN
   return Number.isFinite(v) ? v : fallback
 }
 
@@ -44,7 +51,7 @@ function hasVisiblePageBorder(xml: string): boolean {
   if (!pgBorders) return false
   const sides = pgBorders.match(/<w:(?:top|left|bottom|right)\b[^>]*\/?>/g) ?? []
   return sides.some((side) => {
-    const val = /w:val="([^"]*)"/.exec(side)?.[1]
+    const val = attrValue(side, 'w:val')
     return val !== undefined && val !== 'none' && val !== 'nil'
   })
 }
@@ -82,20 +89,23 @@ const LINE_BORDER_VALS = new Set([
 function pageBorderPropsOf(xml: string): SectionSettings['pageBorderProps'] {
   const pgBorders = /<w:pgBorders[^>]*\/>|<w:pgBorders[\s\S]*?<\/w:pgBorders>/.exec(xml)?.[0]
   if (!pgBorders || !hasVisiblePageBorder(xml)) return undefined
-  const display = /w:display="(firstPage|notFirstPage)"/.exec(pgBorders)?.[1] as
-    'firstPage' | 'notFirstPage' | undefined
-  const offsetFrom = /w:offsetFrom="(page|text)"/.exec(pgBorders)?.[1] as
-    'page' | 'text' | undefined
-  const zOrder = /<w:pgBorders[^>]*\bw:zOrder="back"/.test(pgBorders) ? 'back' : undefined
+  const openTag = /^<w:pgBorders[^>]*>/.exec(pgBorders)?.[0] ?? pgBorders
+  const displayVal = attrValue(openTag, 'w:display')
+  const display =
+    displayVal === 'firstPage' || displayVal === 'notFirstPage' ? displayVal : undefined
+  const offsetFromVal = attrValue(openTag, 'w:offsetFrom')
+  const offsetFrom = offsetFromVal === 'page' || offsetFromVal === 'text' ? offsetFromVal : undefined
+  const zOrder = attrValue(openTag, 'w:zOrder') === 'back' ? 'back' : undefined
   let spacePt = 0
   let widthPt = 0
   let color: string | undefined
   const sides: NonNullable<SectionSettings['pageBorderProps']>['sides'] = {}
   for (const side of pgBorders.match(/<w:(?:top|left|bottom|right)\b[^>]*\/?>/g) ?? []) {
-    const val = /w:val="([^"]*)"/.exec(side)?.[1]
+    const val = attrValue(side, 'w:val')
     if (!val || val === 'none' || val === 'nil') continue
     const name = /<w:(top|left|bottom|right)\b/.exec(side)![1] as keyof typeof sides
-    const sideColor = /w:color="([0-9A-Fa-f]{6})"/.exec(side)?.[1]
+    const rawColor = attrValue(side, 'w:color')
+    const sideColor = rawColor && /^[0-9A-Fa-f]{6}$/.test(rawColor) ? rawColor : undefined
     // art borders: w:sz is the tiled pattern height in points, not eighth-points
     const art = !LINE_BORDER_VALS.has(val)
     const sz = intAttr(side, 'w:sz', 0)
@@ -133,21 +143,20 @@ export function sectionSettingsFromXml(
   let docGrid: DocGrid | undefined
   const docGridTag = /<w:docGrid[^>]*\/?>/.exec(xml)?.[0]
   if (docGridTag) {
-    const typeMatch = /w:type="([^"]+)"/.exec(docGridTag)
-    const linePitchMatch = /w:linePitch="(\d+)"/.exec(docGridTag)
-    const charSpaceMatch = /w:charSpace="(-?\d+)"/.exec(docGridTag)
-    const gridType = (typeMatch?.[1] ?? 'default') as DocGrid['type']
+    const linePitch = attrValue(docGridTag, 'w:linePitch')
+    const charSpace = attrValue(docGridTag, 'w:charSpace')
+    const gridType = (attrValue(docGridTag, 'w:type') ?? 'default') as DocGrid['type']
     const validTypes: DocGrid['type'][] = ['default', 'lines', 'linesAndChars', 'snapToChars']
     docGrid = {
       type: validTypes.includes(gridType) ? gridType : 'default',
-      ...(linePitchMatch ? { linePitch: parseInt(linePitchMatch[1], 10) } : {}),
-      ...(charSpaceMatch ? { charSpace: parseInt(charSpaceMatch[1], 10) } : {}),
+      ...(linePitch && /^\d+$/.test(linePitch) ? { linePitch: parseInt(linePitch, 10) } : {}),
+      ...(charSpace && /^-?\d+$/.test(charSpace) ? { charSpace: parseInt(charSpace, 10) } : {}),
     }
   }
 
   // explicit unequal column widths (w:cols > w:col children)
   const colsElement = /<w:cols[^>]*>[\s\S]*?<\/w:cols>/.exec(xml)?.[0]
-  const colWidths = (colsElement?.match(/<w:col [^>]*w:w="\d+"[^>]*\/>/g) ?? [])
+  const colWidths = (colsElement?.match(/<w:col\b[^>]*\/>/g) ?? [])
     .map((tag) => intAttr(tag, 'w:w', 0))
     .filter((w) => w > 0)
 
@@ -165,7 +174,7 @@ export function sectionSettingsFromXml(
   return {
     pageWidth: intAttr(pgSz, 'w:w', DEFAULT_SECTION.pageWidth),
     pageHeight: intAttr(pgSz, 'w:h', DEFAULT_SECTION.pageHeight),
-    orientation: pgSz.includes('w:orient="landscape"') ? 'landscape' : 'portrait',
+    orientation: attrValue(pgSz, 'w:orient') === 'landscape' ? 'landscape' : 'portrait',
     marginTop: Math.abs(marginTop) + (gutterAtTop ? gutter : 0),
     marginRight: intAttr(pgMar, 'w:right', DEFAULT_SECTION.marginRight),
     marginBottom: Math.abs(marginBottom),
@@ -201,7 +210,10 @@ export function notePropsFromXml(
 ): NoteProps | undefined {
   const el = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(xml)?.[1]
   if (!el) return undefined
-  const val = (name: string) => new RegExp(`<w:${name} w:val="([^"]+)"`).exec(el)?.[1]
+  const val = (name: string) => {
+    const tag = new RegExp(`<w:${name}\\b[^>]*\\/?>`).exec(el)?.[0]
+    return tag ? attrValue(tag, 'w:val') : undefined
+  }
   const pos = val('pos')
   const numFmt = val('numFmt')
   const numStart = val('numStart')
@@ -223,7 +235,7 @@ export function notePropsFromXml(
 export function lineNumberingOf(xml: string): LineNumbering | undefined {
   const tag = /<w:lnNumType\b[^>]*\/?>/.exec(xml)?.[0]
   if (!tag) return undefined
-  const restart = /w:restart="([^"]+)"/.exec(tag)?.[1]
+  const restart = attrValue(tag, 'w:restart')
   const distance = intAttr(tag, 'w:distance', -1)
   return {
     countBy: Math.max(1, intAttr(tag, 'w:countBy', 1)),
@@ -235,7 +247,8 @@ export function lineNumberingOf(xml: string): LineNumbering | undefined {
 }
 
 function textDirectionOf(xml: string): string | undefined {
-  const val = /<w:textDirection[^>]*w:val="([^"]+)"/.exec(xml)?.[1]
+  const tag = /<w:textDirection\b[^>]*\/?>/.exec(xml)?.[0]
+  const val = tag ? attrValue(tag, 'w:val') : undefined
   return val && val !== 'lrTb' ? val : undefined
 }
 
@@ -251,7 +264,7 @@ const SECT_PR_RE = /<w:sectPr[^>]*\/>|<w:sectPr[\s\S]*?<\/w:sectPr>/
  *  off: matches self-closing and paired forms, w:val="0|false|off" counts as off. */
 export function xmlFlagOn(xml: string, tag: string): boolean {
   for (const m of xml.matchAll(new RegExp(`<${tag}(?=[\\s/>])[^>]*>`, 'g'))) {
-    const val = /w:val="([^"]*)"/.exec(m[0])?.[1]
+    const val = attrValue(m[0], 'w:val')
     if (val === undefined || !/^(?:0|false|off)$/.test(val)) return true
   }
   return false
@@ -263,9 +276,10 @@ function hfRefs(
 ): Partial<Record<'default' | 'first' | 'even', string>> {
   const refs: Partial<Record<'default' | 'first' | 'even', string>> = {}
   for (const ref of xml.match(new RegExp(`<w:${kind}Reference[^>]*/>`, 'g')) ?? []) {
-    const type = /w:type="(default|first|even)"/.exec(ref)?.[1] ?? 'default'
-    const rId = /r:id="([^"]+)"/.exec(ref)?.[1]
-    if (rId) refs[type as 'default' | 'first' | 'even'] = rId
+    const typeVal = attrValue(ref, 'w:type')
+    const type = typeVal === 'first' || typeVal === 'even' ? typeVal : 'default'
+    const rId = attrValue(ref, 'r:id')
+    if (rId) refs[type] = rId
   }
   return refs
 }
@@ -276,11 +290,17 @@ export function sectionFromSectPr(
   lastBlockIndex: number,
   gutterAtTop?: boolean,
 ): SectionInfo {
-  const type = /<w:type[^>]*w:val="(nextPage|continuous|evenPage|oddPage|nextColumn)"/.exec(
-    sectPrXml,
-  )?.[1]
-  const pgNumStart = /<w:pgNumType[^>]*w:start="(\d+)"/.exec(sectPrXml)?.[1]
-  const pgNumFmt = /<w:pgNumType[^>]*w:fmt="([^"]+)"/.exec(sectPrXml)?.[1]
+  const typeTag = /<w:type\b[^>]*\/?>/.exec(sectPrXml)?.[0]
+  const typeVal = typeTag ? attrValue(typeTag, 'w:val') : undefined
+  const type = ['nextPage', 'continuous', 'evenPage', 'oddPage', 'nextColumn'].includes(
+    typeVal ?? '',
+  )
+    ? typeVal
+    : undefined
+  const pgNumType = /<w:pgNumType\b[^>]*\/?>/.exec(sectPrXml)?.[0] ?? ''
+  const rawStart = attrValue(pgNumType, 'w:start')
+  const pgNumStart = rawStart !== undefined && /^\d+$/.test(rawStart) ? rawStart : undefined
+  const pgNumFmt = attrValue(pgNumType, 'w:fmt')
   return {
     settings: sectionSettingsFromXml(sectPrXml, { gutterAtTop }),
     startType: (type as SectionInfo['startType']) ?? 'nextPage',
@@ -356,8 +376,11 @@ export function applySectionSettings(sectPrXml: string, settings: SectionSetting
     xml = xml.replace(/(<w:sectPr[^>]*>)/, `$1${pgSz}`)
   }
   const replaceMarAttr = (tag: string, name: string, value: number): string => {
-    if (new RegExp(`${name}="`).test(tag)) {
-      return tag.replace(new RegExp(`${name}="-?\\d+"`), `${name}="${value}"`)
+    // keep the document's own quote character so an untouched attribute stays byte-identical
+    const existing = new RegExp(`${name}=("|')-?\\d*\\1`).exec(tag)
+    if (existing) {
+      const q = existing[1]
+      return tag.replace(existing[0], `${name}=${q}${value}${q}`)
     }
     return tag.replace(/\/>$/, ` ${name}="${value}"/>`)
   }
@@ -422,7 +445,7 @@ export function applySectionSettings(sectPrXml: string, settings: SectionSetting
   ) {
     // explicit unequal widths: rebuild the element (opt-in via colWidths) —
     // unless the document already carries exactly these values (round-trip)
-    const currentWidths = (colsMatch?.[0].match(/<w:col [^>]*w:w="\d+"[^>]*\/>/g) ?? []).map((t) =>
+    const currentWidths = (colsMatch?.[0].match(/<w:col\b[^>]*\/>/g) ?? []).map((t) =>
       intAttr(t, 'w:w', 0),
     )
     const unchanged =
@@ -445,16 +468,17 @@ export function applySectionSettings(sectPrXml: string, settings: SectionSetting
   } else if (colsMatch) {
     const openTag = /^<w:cols[^>]*>/.exec(colsMatch[0])?.[0] ?? colsMatch[0]
     const selfClosing = colsMatch[0].endsWith('/>')
-    const currentNum = / w:num="(\d+)"/.exec(openTag)?.[1] ?? '1'
-    if (selfClosing || currentNum !== String(settings.columns)) {
+    const currentNum = intAttr(openTag, 'w:num', 1)
+    if (selfClosing || currentNum !== settings.columns) {
       // explicit per-column widths only stay valid while the count is unchanged
-      let tag = openTag.replace(/ w:num="\d+"/, '').replace(/\/?>$/, '/>')
+      let tag = openTag.replace(/ w:num=("|')\d*\1/, '').replace(/\/?>$/, '/>')
       if (numAttr) tag = tag.replace(/^<w:cols/, `<w:cols${numAttr}`)
       // honor an explicitly different column gap (720 = OOXML default); equal
       // values leave the tag byte-identical for round-trip safety
       if (settings.colSpace !== undefined && settings.colSpace !== intAttr(tag, 'w:space', 720)) {
-        tag = / w:space="\d+"/.test(tag)
-          ? tag.replace(/ w:space="\d+"/, ` w:space="${settings.colSpace}"`)
+        const space = / w:space=("|')\d*\1/.exec(tag)
+        tag = space
+          ? tag.replace(space[0], ` w:space="${settings.colSpace}"`)
           : tag.replace(/\/>$/, ` w:space="${settings.colSpace}"/>`)
       }
       xml = xml.replace(colsMatch[0], tag)
@@ -502,6 +526,7 @@ export function applyTitlePg(sectPrXml: string, on: boolean): string {
 
 /** Read the page color (w:background) from document.xml; null when unset. */
 export function readPageColor(parsed: ParsedDoc): string | null {
-  const m = /<w:background[^>]*w:color="([0-9A-Fa-f]{6})"/.exec(parsed.internal.documentXml)
-  return m ? m[1].toUpperCase() : null
+  const tag = /<w:background\b[^>]*\/?>/.exec(parsed.internal.documentXml)?.[0]
+  const color = tag ? attrValue(tag, 'w:color') : undefined
+  return color && /^[0-9A-Fa-f]{6}$/.test(color) ? color.toUpperCase() : null
 }

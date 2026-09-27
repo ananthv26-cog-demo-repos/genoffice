@@ -866,3 +866,47 @@ describe('sectPr w:lnNumType', () => {
     expect([flag('Quiet'), flag('Loud'), flag('Inherit')]).toEqual([true, false, true])
   })
 })
+
+describe('single-quoted attributes (genspark-ai/genoffice#1233)', () => {
+  const SQ =
+    "<w:sectPr><w:type w:val='continuous'/><w:pgSz w:w='11906' w:h='16838' w:orient='landscape'/>" +
+    "<w:pgMar w:top='1134' w:right='850' w:bottom='1134' w:left='1701' w:header='708' w:footer='708' w:gutter='0'/>" +
+    "<w:pgNumType w:fmt='lowerRoman' w:start='3'/><w:cols w:num='2' w:space='400'/><w:vAlign w:val='center'/>" +
+    "<w:docGrid w:type='lines' w:linePitch='312'/></w:sectPr>"
+
+  it('reads page size, margins and the rest instead of substituting DEFAULT_SECTION', () => {
+    expect(sectionSettingsFromXml(SQ)).toMatchObject({
+      pageWidth: 11906,
+      pageHeight: 16838,
+      orientation: 'landscape',
+      marginTop: 1134,
+      marginRight: 850,
+      marginBottom: 1134,
+      marginLeft: 1701,
+      headerDist: 708,
+      footerDist: 708,
+      columns: 2,
+      colSpace: 400,
+      vAlign: 'center',
+      docGrid: { type: 'lines', linePitch: 312 },
+    })
+    const section = readSections({
+      blocks: [{ hidden: true, docxIndex: 0, originalXml: SQ }],
+    } as never)[0]
+    expect(section.startType).toBe('continuous')
+    expect(section.pageNumberStart).toBe(3)
+    expect(section.pageNumberFmt).toBe('lowerRoman')
+  })
+
+  it('saving back rewrites the single-quoted attributes in place, never duplicating them', () => {
+    const settings = sectionSettingsFromXml(SQ)
+    const out = applySectionSettings(SQ, { ...settings, marginLeft: 2000 })
+    expect(out).toContain("w:top='1134'")
+    expect(out).toContain("w:left='2000'")
+    expect(out).toContain('<w:pgSz w:w="11906" w:h="16838" w:orient="landscape"/>')
+    const pgMar = /<w:pgMar[^>]*\/>/.exec(out)![0]
+    for (const name of ['w:top', 'w:right', 'w:bottom', 'w:left', 'w:header', 'w:footer']) {
+      expect(pgMar.match(new RegExp(`${name}=`, 'g'))!.length).toBe(1)
+    }
+  })
+})
